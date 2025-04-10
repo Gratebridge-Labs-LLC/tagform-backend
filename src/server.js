@@ -21,11 +21,28 @@ app.use((req, res, next) => {
 
 // Rate limiting
 const rateLimit = require('express-rate-limit');
-const limiter = rateLimit({
+
+// More generous limits for API endpoints
+const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100 // limit each IP to 100 requests per windowMs
+  max: 1000, // 1000 requests per 15 minutes
+  message: { error: 'Too many requests, please try again later' },
+  standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
+  legacyHeaders: false, // Disable the `X-RateLimit-*` headers
 });
-app.use('/api/', limiter);
+
+// Stricter limits for auth endpoints to prevent brute force
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // 100 requests per 15 minutes
+  message: { error: 'Too many authentication attempts, please try again later' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// Apply rate limiting
+app.use('/api/auth', authLimiter); // Stricter limit for auth routes
+app.use('/api/', apiLimiter); // General limit for other routes
 
 // Initialize Supabase client
 const supabaseUrl = process.env.SUPABASE_URL;
@@ -35,8 +52,11 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 // Routes
 const authRoutes = require('./routes/authRoutes');
 const workspaceRoutes = require('./routes/workspaceRoutes');
+const formRoutes = require('./routes/formRoutes');
+
 app.use('/api/auth', authRoutes);
 app.use('/api/workspaces', workspaceRoutes);
+app.use('/api/workspaces/:workspaceId/forms', formRoutes);
 
 // Basic route
 app.get('/', (req, res) => {

@@ -3,9 +3,16 @@ require('dotenv').config();
 
 class WorkspaceService {
   constructor() {
+    // Create a Supabase client with the service role key for admin operations
     this.supabase = createClient(
       process.env.SUPABASE_URL,
-      process.env.SUPABASE_ANON_KEY
+      process.env.SUPABASE_SERVICE_ROLE_KEY,
+      {
+        auth: {
+          autoRefreshToken: false,
+          persistSession: false
+        }
+      }
     );
   }
 
@@ -45,12 +52,15 @@ class WorkspaceService {
     try {
       let query = this.supabase
         .from('workspaces')
-        .select('*');
+        .select('*', { count: 'exact' });
 
       // Filter by type if specified
       if (options.type) {
         query = query.eq('type', options.type);
       }
+
+      // Filter to show only user's private workspaces and all public workspaces
+      query = query.or(`user_id.eq.${userId},type.eq.public`);
 
       // Search by name if specified
       if (options.search) {
@@ -78,6 +88,27 @@ class WorkspaceService {
           total: count
         }
       };
+    } catch (error) {
+      throw error;
+    }
+  }
+
+  /**
+   * Get a single workspace by ID
+   * @param {string} workspaceId 
+   * @param {string} userId 
+   */
+  async getWorkspace(workspaceId, userId) {
+    try {
+      const { data, error } = await this.supabase
+        .from('workspaces')
+        .select('*')
+        .eq('id', workspaceId)
+        .or(`user_id.eq.${userId},type.eq.public`)
+        .single();
+
+      if (error) throw error;
+      return data;
     } catch (error) {
       throw error;
     }

@@ -52,6 +52,27 @@ class WorkspaceController {
       res.status(500).json({ error: error.message });
     }
   }
+
+  /**
+   * Get a single workspace by ID
+   */
+  async getWorkspace(req, res) {
+    try {
+      const { workspaceId } = req.params;
+      const userId = req.user.id;  // Set by auth middleware
+
+      const workspace = await workspaceService.getWorkspace(workspaceId, userId);
+      
+      if (!workspace) {
+        return res.status(404).json({ error: 'Workspace not found' });
+      }
+
+      res.json(workspace);
+    } catch (error) {
+      console.error('Get workspace error:', error);
+      res.status(500).json({ error: error.message });
+    }
+  }
 }
 
 module.exports = new WorkspaceController(); 
