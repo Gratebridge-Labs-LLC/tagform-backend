@@ -1,4 +1,5 @@
 const { createClient } = require('@supabase/supabase-js');
+const emailService = require('./emailService');
 require('dotenv').config();
 
 class AuthService {
@@ -23,11 +24,15 @@ class AuthService {
         options: {
           data: {
             full_name: fullName,
-          },
+          }
         },
       });
 
       if (error) throw error;
+
+      // Send welcome email
+      await emailService.sendWelcomeEmail(email, fullName);
+
       return data;
     } catch (error) {
       throw error;

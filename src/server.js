@@ -34,7 +34,9 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 
 // Routes
 const authRoutes = require('./routes/authRoutes');
+const workspaceRoutes = require('./routes/workspaceRoutes');
 app.use('/api/auth', authRoutes);
+app.use('/api/workspaces', workspaceRoutes);
 
 // Basic route
 app.get('/', (req, res) => {
