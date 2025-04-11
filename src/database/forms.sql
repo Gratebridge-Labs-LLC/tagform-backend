@@ -28,12 +28,14 @@ create table public.forms (
 create table public.questions (
     id uuid default gen_random_uuid() primary key,
     form_id uuid references public.forms(id) on delete cascade not null,
+    parent_id uuid references public.questions(id) on delete cascade,
     type question_type not null,
     text text not null,
     description text,
     is_required boolean default false,
     max_chars integer,
     "order" integer not null,
+    path ltree,
     created_at timestamp with time zone default timezone('utc'::text, now()) not null,
     updated_at timestamp with time zone default timezone('utc'::text, now()) not null
 );
@@ -181,4 +183,36 @@ create trigger handle_question_choices_updated_at
 create trigger handle_form_settings_updated_at
     before update on public.form_settings
     for each row
-    execute procedure public.handle_updated_at(); 
+    execute procedure public.handle_updated_at();
+
+-- Enable ltree extension for hierarchical paths
+create extension if not exists ltree;
+
+-- Create index on path for faster hierarchical queries
+create index questions_path_idx on public.questions using gist (path);
+
+-- Create index on parent_id for faster parent-child queries
+create index questions_parent_id_idx on public.questions(parent_id);
+
+-- Function to update question path
+create or replace function public.update_question_path()
+returns trigger as $$
+begin
+    if NEW.parent_id is null then
+        NEW.path = text2ltree(NEW.id::text);
+    else
+        select path || text2ltree(NEW.id::text)
+        into NEW.path
+        from public.questions
+        where id = NEW.parent_id;
+    end if;
+    return NEW;
+end;
+$$ language plpgsql;
+
+-- Trigger to automatically update path
+create trigger update_question_path_trigger
+    before insert or update of parent_id
+    on public.questions
+    for each row
+    execute function public.update_question_path(); 

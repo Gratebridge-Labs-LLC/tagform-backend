@@ -27,4 +27,18 @@ router.post('/:formId/questions/:questionId/choices/reorder', authenticateUser, 
 router.get('/:formId/settings', authenticateUser, formController.getFormSettings);
 router.put('/:formId/settings', authenticateUser, formController.updateFormSettings);
 
+// Submission routes
+router.post('/:formId/submissions/start', formController.startSubmission);
+router.post('/:formId/submissions/:submissionId/complete', formController.completeSubmission);
+router.get('/:formId/submissions', authenticateUser, formController.listSubmissions);
+router.get('/:formId/submissions/:submissionId', authenticateUser, formController.getSubmission);
+
+// Analytics routes
+router.get('/:formId/analytics', authenticateUser, formController.getFormAnalytics);
+router.get('/:formId/questions/:questionId/analytics', authenticateUser, formController.getQuestionAnalytics);
+router.get('/:formId/analytics/export', authenticateUser, formController.exportAnalytics);
+
+// New public form access route (no auth required)
+router.get('/:workspaceSlug/:formSlug', formController.getFormBySlug);
+
 module.exports = router; 

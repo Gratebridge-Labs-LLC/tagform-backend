@@ -311,6 +311,183 @@ class FormController {
       res.status(500).json({ error: 'Failed to reorder question choices' });
     }
   }
+
+  /**
+   * Start a form submission
+   */
+  async startSubmission(req, res) {
+    try {
+      const { formId } = req.params;
+      const { email } = req.body;
+
+      if (!email) {
+        return res.status(400).json({ error: 'Email is required' });
+      }
+
+      // Validate email format
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(email)) {
+        return res.status(400).json({ error: 'Invalid email format' });
+      }
+
+      const submission = await formService.startSubmission(formId, email, {
+        ip_address: req.ip,
+        user_agent: req.get('User-Agent')
+      });
+
+      res.status(201).json(submission);
+    } catch (error) {
+      console.error('Error starting submission:', error);
+      if (error.message === 'Duplicate submission') {
+        res.status(409).json({ error: 'You have already submitted this form' });
+      } else {
+        res.status(500).json({ error: 'Failed to start submission' });
+      }
+    }
+  }
+
+  /**
+   * Complete a form submission
+   */
+  async completeSubmission(req, res) {
+    try {
+      const { formId, submissionId } = req.params;
+      const { responses, startTime } = req.body;
+
+      if (!Array.isArray(responses)) {
+        return res.status(400).json({ error: 'Responses must be an array' });
+      }
+
+      const completionTime = startTime ? Math.floor((Date.now() - startTime) / 1000) : null;
+
+      const submission = await formService.completeSubmission(formId, submissionId, responses, completionTime);
+      res.json(submission);
+    } catch (error) {
+      console.error('Error completing submission:', error);
+      res.status(500).json({ error: 'Failed to complete submission' });
+    }
+  }
+
+  /**
+   * List form submissions
+   */
+  async listSubmissions(req, res) {
+    try {
+      const { formId } = req.params;
+      const { page, limit, sort_by, sort_order } = req.query;
+
+      const result = await formService.listSubmissions(formId, {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        sortBy: sort_by,
+        sortOrder: sort_order
+      });
+
+      res.json(result);
+    } catch (error) {
+      console.error('Error listing submissions:', error);
+      res.status(500).json({ error: 'Failed to list submissions' });
+    }
+  }
+
+  /**
+   * Get submission details
+   */
+  async getSubmission(req, res) {
+    try {
+      const { submissionId } = req.params;
+      const submission = await formService.getSubmission(submissionId);
+
+      if (!submission) {
+        return res.status(404).json({ error: 'Submission not found' });
+      }
+
+      res.json(submission);
+    } catch (error) {
+      console.error('Error getting submission:', error);
+      res.status(500).json({ error: 'Failed to get submission' });
+    }
+  }
+
+  /**
+   * Get form analytics
+   */
+  async getFormAnalytics(req, res) {
+    try {
+      const { formId } = req.params;
+      const { start_date, end_date } = req.query;
+
+      const analytics = await formService.getFormAnalytics(formId, {
+        startDate: start_date,
+        endDate: end_date
+      });
+
+      res.json(analytics);
+    } catch (error) {
+      console.error('Error getting form analytics:', error);
+      res.status(500).json({ error: 'Failed to get form analytics' });
+    }
+  }
+
+  /**
+   * Get question analytics
+   */
+  async getQuestionAnalytics(req, res) {
+    try {
+      const { questionId } = req.params;
+      const { start_date, end_date } = req.query;
+
+      const analytics = await formService.getQuestionAnalytics(questionId, {
+        startDate: start_date,
+        endDate: end_date
+      });
+
+      res.json(analytics);
+    } catch (error) {
+      console.error('Error getting question analytics:', error);
+      res.status(500).json({ error: 'Failed to get question analytics' });
+    }
+  }
+
+  /**
+   * Export analytics data
+   */
+  async exportAnalytics(req, res) {
+    try {
+      const { formId } = req.params;
+      const { format = 'csv' } = req.query;
+
+      const data = await formService.exportAnalytics(formId, format);
+
+      // Set appropriate headers
+      res.setHeader('Content-Type', format === 'csv' ? 'text/csv' : 'application/json');
+      res.setHeader('Content-Disposition', `attachment; filename=analytics.${format}`);
+
+      res.send(data);
+    } catch (error) {
+      console.error('Error exporting analytics:', error);
+      res.status(500).json({ error: 'Failed to export analytics' });
+    }
+  }
+
+  /**
+   * Get form by workspace and form slugs
+   */
+  async getFormBySlug(req, res) {
+    try {
+      const { workspaceSlug, formSlug } = req.params;
+      const form = await formService.getFormBySlug(workspaceSlug, formSlug);
+      res.json(form);
+    } catch (error) {
+      console.error('Error getting form by slug:', error);
+      res.status(error.status || 500).json({
+        error: {
+          message: error.message || 'Failed to get form',
+          code: error.code || 'FORM_FETCH_ERROR'
+        }
+      });
+    }
+  }
 }
 
 module.exports = new FormController(); 
