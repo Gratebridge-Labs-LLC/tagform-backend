@@ -23,6 +23,29 @@ class FormService {
   }
 
   /**
+   * Convert a string to a URL-safe slug
+   * @private
+   */
+  _createSlug(str) {
+    return str
+      .toLowerCase()
+      .trim()
+      .replace(/[^\w\s-]/g, '') // Remove non-word chars
+      .replace(/[\s_-]+/g, '-') // Replace spaces and _ with -
+      .replace(/^-+|-+$/g, ''); // Remove leading/trailing -
+  }
+
+  /**
+   * Get shareable link for a form
+   * @private
+   */
+  _getShareableLink(workspaceName, formName) {
+    const workspaceSlug = this._createSlug(workspaceName);
+    const formSlug = this._createSlug(formName);
+    return `${process.env.APP_URL || 'https://tagform.xyz'}/${workspaceSlug}/${formSlug}`;
+  }
+
+  /**
    * List forms in a workspace
    */
   async listForms(workspaceId, options = {}) {
@@ -40,6 +63,19 @@ class FormService {
       // Use admin client to bypass RLS if available
       const client = this.adminClient || this.supabase;
       
+      // Get workspace name first
+      const { data: workspace, error: workspaceError } = await client
+        .from('workspaces')
+        .select('name')
+        .eq('id', workspaceId)
+        .single();
+
+      if (workspaceError) {
+        console.error('Error fetching workspace:', workspaceError);
+        throw new Error(`Failed to fetch workspace: ${workspaceError.message}`);
+      }
+
+      // Get forms
       const { data, error, count } = await client
         .from('forms')
         .select('*', { count: 'exact' })
@@ -52,10 +88,16 @@ class FormService {
         throw new Error(`Failed to fetch forms: ${error.message}`);
       }
 
+      // Add shareable link to each form
+      const formsWithLinks = data.map(form => ({
+        ...form,
+        shareable_link: this._getShareableLink(workspace.name, form.name)
+      }));
+
       console.log(`Found ${count || 0} forms`);
 
       return {
-        forms: data || [],
+        forms: formsWithLinks || [],
         pagination: {
           page,
           limit,
@@ -70,20 +112,58 @@ class FormService {
   }
 
   /**
+   * Validate if a slug is unique within a workspace
+   * @private
+   */
+  async _validateUniqueSlug(workspaceId, slug) {
+    const { data, error } = await this.supabase
+      .from('forms')
+      .select('id')
+      .eq('workspace_id', workspaceId)
+      .eq('slug', slug)
+      .single();
+
+    if (error && error.code !== 'PGRST116') { // PGRST116 is "no rows returned"
+      throw error;
+    }
+
+    return !data; // Returns true if slug is unique
+  }
+
+  /**
    * Create a new form
    */
   async createForm(workspaceId, { name, description, is_private }) {
     try {
-      // Create form
+      // Generate initial slug
+      let slug = this._createSlug(name);
+      let isUnique = await this._validateUniqueSlug(workspaceId, slug);
+      
+      // If slug exists, append a number until we find a unique one
+      let counter = 1;
+      while (!isUnique) {
+        slug = `${this._createSlug(name)}-${counter}`;
+        isUnique = await this._validateUniqueSlug(workspaceId, slug);
+        counter++;
+      }
+
+      // Create form with the unique slug
       const { data: form, error: formError } = await this.supabase
         .from('forms')
-        .insert([
-          { workspace_id: workspaceId, name, description, is_private }
-        ])
+        .insert([{
+          workspace_id: workspaceId,
+          name,
+          description,
+          is_private,
+          slug
+        }])
         .select()
         .single();
 
-      if (formError) throw formError;
+      if (formError) {
+        console.error('[FormService] Error creating form:', formError);
+        throw formError;
+      }
 
       // Create default form settings
       const { data: settings, error: settingsError } = await this.supabase
@@ -101,10 +181,20 @@ class FormService {
         .select()
         .single();
 
-      if (settingsError) throw settingsError;
+      if (settingsError) {
+        console.error('[FormService] Error creating form settings:', settingsError);
+        throw settingsError;
+      }
+
+      console.log('[FormService] Successfully created form:', {
+        formId: form.id,
+        name: form.name,
+        slug: form.slug
+      });
 
       return { ...form, settings };
     } catch (error) {
+      console.error('[FormService] Error in createForm:', error);
       throw error;
     }
   }
@@ -123,16 +213,19 @@ class FormService {
       // Use admin client to bypass RLS if available
       const client = this.adminClient || this.supabase;
 
-      // Get form with questions and settings
+      // Get form with questions, settings, and workspace info
       const { data: form, error: formError } = await client
         .from('forms')
         .select(`
           *,
-          questions:questions (
+          questions (
             *,
             choices:question_choices (*)
           ),
-          settings:form_settings (*)
+          settings:form_settings (*),
+          workspaces!inner (
+            name
+          )
         `)
         .eq('id', formId)
         .single();
@@ -146,7 +239,9 @@ class FormService {
         throw new Error(`Form with id ${formId} not found`);
       }
 
-      console.log(`Successfully fetched form ${formId}`);
+      // Add shareable link
+      form.shareable_link = this._getShareableLink(form.workspaces.name, form.name);
+      delete form.workspaces; // Remove workspace info from response
 
       // Sort questions and choices by order
       if (form.questions) {
@@ -158,6 +253,7 @@ class FormService {
         });
       }
 
+      console.log(`Successfully fetched form ${formId}`);
       return form;
     } catch (error) {
       console.error('Error in getForm:', error);
@@ -680,35 +776,92 @@ class FormService {
   /**
    * Start a form submission
    */
-  async startSubmission(formId, email, metadata = {}) {
-    // Check for existing incomplete submission
-    const { data: existingSubmission } = await this.supabase
-      .from('form_submissions')
-      .select('*')
-      .eq('form_id', formId)
-      .eq('email', email)
-      .eq('status', 'in_progress')
-      .single();
+  async startSubmission(formId, email, req) {
+    try {
+      console.log(`[FormService] Starting submission for form ${formId} with email ${email}`);
+      
+      // Use admin client for public operations
+      const client = this.adminClient || this.supabase;
 
-    if (existingSubmission) {
-      return existingSubmission;
+      // First check if a submission exists
+      const { data: existingSubmission, error: checkError } = await client
+        .from('form_submissions')
+        .select('*')
+        .eq('form_id', formId)
+        .eq('email', email)
+        .single();
+
+      if (checkError && checkError.code !== 'PGRST116') { // PGRST116 is "no rows returned"
+        console.error('[FormService] Error checking existing submission:', checkError);
+        throw new Error('Failed to check existing submission');
+      }
+
+      // If submission exists
+      if (existingSubmission) {
+        // If completed, return error with more details
+        if (existingSubmission.status === 'completed') {
+          console.log('[FormService] Found completed submission:', {
+            submissionId: existingSubmission.id,
+            formId: existingSubmission.form_id,
+            email: existingSubmission.email,
+            completedAt: existingSubmission.completed_at
+          });
+          return {
+            error: true,
+            message: `This form has already been completed by ${email} on ${new Date(existingSubmission.completed_at).toLocaleString()}`,
+            submission: {
+              id: existingSubmission.id,
+              completedAt: existingSubmission.completed_at,
+              email: existingSubmission.email
+            }
+          };
+        }
+        // If in progress, return it to continue
+        console.log('[FormService] Found in-progress submission:', {
+          submissionId: existingSubmission.id,
+          formId: existingSubmission.form_id,
+          email: existingSubmission.email,
+          startedAt: existingSubmission.started_at,
+          status: existingSubmission.status
+        });
+        return existingSubmission;
+      }
+
+      // Create new submission
+      const now = new Date().toISOString();
+      const { data: submission, error: submissionError } = await client
+        .from('form_submissions')
+        .insert({
+          form_id: formId,
+          email,
+          status: 'in_progress',
+          started_at: now,
+          metadata: {
+            user_agent: req?.headers?.['user-agent'],
+            ip_address: req?.ip
+          }
+        })
+        .select()
+        .single();
+
+      if (submissionError) {
+        console.error('[FormService] Error creating submission:', submissionError);
+        throw new Error('Failed to create submission');
+      }
+
+      console.log('[FormService] Successfully created new submission:', {
+        submissionId: submission.id,
+        formId: submission.form_id,
+        email: submission.email,
+        startedAt: submission.started_at,
+        status: submission.status
+      });
+
+      return submission;
+    } catch (error) {
+      console.error('[FormService] Error in startSubmission:', error);
+      throw error;
     }
-
-    // Create new submission
-    const { data: submission, error } = await this.supabase
-      .from('form_submissions')
-      .insert({
-        form_id: formId,
-        email,
-        status: 'in_progress',
-        metadata,
-        started_at: new Date().toISOString()
-      })
-      .select()
-      .single();
-
-    if (error) throw new Error(`Failed to create submission: ${error.message}`);
-    return submission;
   }
 
   /**
@@ -861,31 +1014,55 @@ class FormService {
    * Update form analytics
    */
   async updateFormAnalytics(formId) {
-    // Get all completed submissions
-    const { data: submissions, error: submissionsError } = await this.supabase
-      .from('form_submissions')
-      .select('*')
-      .eq('form_id', formId)
-      .eq('status', 'completed');
+    try {
+      console.log(`[FormService] Updating analytics for form ${formId}`);
+      
+      const client = this.adminClient || this.supabase;
 
-    if (submissionsError) throw new Error(`Failed to fetch submissions for analytics: ${submissionsError.message}`);
+      // Get all completed submissions for this form
+      const { data: submissions, error: submissionsError } = await client
+        .from('form_submissions')
+        .select('completion_time')
+        .eq('form_id', formId)
+        .eq('status', 'completed');
 
-    // Calculate analytics
-    const totalSubmissions = submissions.length;
-    const averageCompletionTime = submissions.reduce((acc, sub) => acc + (sub.completion_time || 0), 0) / totalSubmissions;
+      if (submissionsError) {
+        console.error('[FormService] Error fetching submissions:', submissionsError);
+        throw new Error('Failed to fetch submissions');
+      }
 
-    // Update analytics record
-    const { error: updateError } = await this.supabase
-      .from('form_analytics')
-      .upsert({
-        form_id: formId,
-        total_submissions: totalSubmissions,
-        average_completion_time: averageCompletionTime,
-        last_updated: new Date().toISOString()
+      // Calculate analytics
+      const totalSubmissions = submissions.length;
+      const averageCompletionTime = totalSubmissions > 0
+        ? Math.round(submissions.reduce((sum, sub) => sum + (sub.completion_time || 0), 0) / totalSubmissions)
+        : 0;
+
+      // Update analytics
+      const { error: updateError } = await client
+        .from('form_analytics')
+        .upsert({
+          form_id: formId,
+          total_submissions: totalSubmissions,
+          average_completion_time: averageCompletionTime,
+          updated_at: new Date().toISOString()
+        }, {
+          onConflict: 'form_id'
+        });
+
+      if (updateError) {
+        console.error('[FormService] Error updating analytics:', updateError);
+        throw new Error('Failed to update analytics');
+      }
+
+      console.log('[FormService] Successfully updated analytics:', {
+        formId,
+        totalSubmissions,
+        averageCompletionTime
       });
-
-    if (updateError) throw new Error(`Failed to update analytics: ${updateError.message}`);
-    return { success: true };
+    } catch (error) {
+      console.error('[FormService] Error in updateFormAnalytics:', error);
+      throw error;
+    }
   }
 
   /**
@@ -1032,6 +1209,258 @@ class FormService {
       return form;
     } catch (error) {
       console.error('Error in getFormBySlug:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get form by URL path
+   * @param {string} path - The URL path after the domain (e.g., "my-workspace/my-form")
+   */
+  async getFormByPath(path) {
+    try {
+      console.log(`[FormService] Fetching form by path: ${path}`);
+      
+      // Split path into workspace and form parts
+      const [workspaceSlug, formSlug] = path.split('/');
+      
+      if (!workspaceSlug || !formSlug) {
+        console.error('[FormService] Invalid path format:', { path });
+        throw new Error('Invalid form path format');
+      }
+
+      // Use admin client to bypass RLS if available
+      const client = this.adminClient || this.supabase;
+
+      // First get the workspace by name (convert slug back to name format)
+      const workspaceName = workspaceSlug.replace(/-/g, ' ');
+      console.log('[FormService] Fetching workspace with name:', workspaceName);
+      
+      const { data: workspaces, error: workspaceError } = await client
+        .from('workspaces')
+        .select('id, name')
+        .ilike('name', workspaceName);
+
+      if (workspaceError) {
+        console.error('[FormService] Error fetching workspace:', workspaceError);
+        throw new Error('Failed to fetch workspace');
+      }
+
+      console.log('[FormService] Found workspaces:', workspaces);
+
+      if (!workspaces || workspaces.length === 0) {
+        console.error('[FormService] Workspace not found:', { workspaceName });
+        throw new Error('Workspace not found');
+      }
+
+      const workspaceId = workspaces[0].id;
+      const workspaceNameFound = workspaces[0].name;
+
+      console.log('[FormService] Using workspace:', {
+        id: workspaceId,
+        name: workspaceNameFound
+      });
+
+      // Then get the form with its questions and settings
+      console.log('[FormService] Fetching form:', { workspaceId, formSlug });
+      const { data: forms, error: formError } = await client
+        .from('forms')
+        .select(`
+          *,
+          questions (
+            *,
+            choices:question_choices (
+              id,
+              text,
+              order
+            )
+          ),
+          settings:form_settings (*)
+        `)
+        .eq('workspace_id', workspaceId)
+        .ilike('name', formSlug.replace(/-/g, ' '));
+
+      if (formError) {
+        console.error('[FormService] Error fetching form:', formError);
+        throw new Error('Failed to fetch form');
+      }
+
+      console.log('[FormService] Found forms:', forms);
+
+      if (!forms || forms.length === 0) {
+        console.error('[FormService] Form not found:', { workspaceId, formSlug });
+        throw new Error('Form not found');
+      }
+
+      const form = forms[0];
+
+      // Sort questions and choices by order
+      if (form.questions) {
+        form.questions.sort((a, b) => a.order - b.order);
+        form.questions.forEach(question => {
+          if (question.choices) {
+            question.choices.sort((a, b) => a.order - b.order);
+          }
+        });
+      }
+
+      // Add shareable link using the workspace name and form name
+      form.shareable_link = `${process.env.APP_URL || 'https://tagform.xyz'}/${this._createSlug(workspaceNameFound)}/${this._createSlug(form.name)}`;
+
+      console.log(`[FormService] Successfully fetched form:`, {
+        formId: form.id,
+        workspaceName: workspaceNameFound,
+        formName: form.name,
+        questionCount: form.questions?.length || 0
+      });
+
+      return form;
+    } catch (error) {
+      console.error('[FormService] Error in getFormByPath:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Regenerate slugs for all forms in a workspace
+   */
+  async regenerateSlugs(workspaceId) {
+    try {
+      // Get all forms in the workspace
+      const { data: forms, error: fetchError } = await this.supabase
+        .from('forms')
+        .select('id, name')
+        .eq('workspace_id', workspaceId);
+
+      if (fetchError) {
+        console.error('[FormService] Error fetching forms:', fetchError);
+        throw fetchError;
+      }
+
+      // Process each form
+      const results = [];
+      for (const form of forms) {
+        // Generate initial slug
+        let slug = this._createSlug(form.name);
+        let isUnique = await this._validateUniqueSlug(workspaceId, slug);
+        
+        // If slug exists, append a number until we find a unique one
+        let counter = 1;
+        while (!isUnique) {
+          slug = `${this._createSlug(form.name)}-${counter}`;
+          isUnique = await this._validateUniqueSlug(workspaceId, slug);
+          counter++;
+        }
+
+        // Update the form with the new slug
+        const { data: updatedForm, error: updateError } = await this.supabase
+          .from('forms')
+          .update({ slug })
+          .eq('id', form.id)
+          .select()
+          .single();
+
+        if (updateError) {
+          console.error(`[FormService] Error updating form ${form.id}:`, updateError);
+          results.push({ formId: form.id, success: false, error: updateError });
+        } else {
+          console.log(`[FormService] Successfully updated form ${form.id} with slug:`, slug);
+          results.push({ formId: form.id, success: true, slug });
+        }
+      }
+
+      return results;
+    } catch (error) {
+      console.error('[FormService] Error in regenerateSlugs:', error);
+      throw error;
+    }
+  }
+
+  async listSubmissionsWithDetails(formId, { page = 1, limit = 10, sortBy = 'created_at', sortOrder = 'desc' } = {}) {
+    try {
+      console.log(`[FormService] Fetching submissions with details for form ${formId}`);
+      
+      const client = this.adminClient || this.supabase;
+
+      // First get the form with its questions
+      const { data: form, error: formError } = await client
+        .from('forms')
+        .select(`
+          id,
+          name,
+          questions (
+            id,
+            text,
+            type,
+            description,
+            is_required,
+            order,
+            choices:question_choices (
+              id,
+              text,
+              order
+            )
+          )
+        `)
+        .eq('id', formId)
+        .single();
+
+      if (formError) {
+        console.error('[FormService] Error fetching form:', formError);
+        throw new Error('Failed to fetch form');
+      }
+
+      // Get submissions with responses
+      const { data: submissions, error: submissionsError, count } = await client
+        .from('form_submissions')
+        .select(`
+          *,
+          question_responses (
+            question_id,
+            answer,
+            choices,
+            response_data
+          )
+        `, { count: 'exact' })
+        .eq('form_id', formId)
+        .order(sortBy, { ascending: sortOrder === 'asc' })
+        .range((page - 1) * limit, page * limit - 1);
+
+      if (submissionsError) {
+        console.error('[FormService] Error fetching submissions:', submissionsError);
+        throw new Error('Failed to fetch submissions');
+      }
+
+      // Create a map of question IDs to questions for easy lookup
+      const questionMap = new Map(form.questions.map(q => [q.id, q]));
+
+      // Enhance submissions with question details
+      const enhancedSubmissions = submissions.map(submission => ({
+        ...submission,
+        question_responses: submission.question_responses.map(response => ({
+          ...response,
+          question: questionMap.get(response.question_id)
+        })).sort((a, b) => (a.question?.order || 0) - (b.question?.order || 0))
+      }));
+
+      console.log(`[FormService] Found ${enhancedSubmissions.length} submissions`);
+
+      return {
+        submissions: enhancedSubmissions,
+        pagination: {
+          page,
+          limit,
+          total: count,
+          totalPages: Math.ceil(count / limit)
+        },
+        form: {
+          id: form.id,
+          name: form.name,
+          questions: form.questions.sort((a, b) => a.order - b.order)
+        }
+      };
+    } catch (error) {
+      console.error('[FormService] Error in listSubmissionsWithDetails:', error);
       throw error;
     }
   }

@@ -57,6 +57,7 @@ const formRoutes = require('./routes/formRoutes');
 app.use('/api/auth', authRoutes);
 app.use('/api/workspaces', workspaceRoutes);
 app.use('/api/workspaces/:workspaceId/forms', formRoutes);
+app.use('/api', formRoutes);
 
 // Basic route
 app.get('/', (req, res) => {
